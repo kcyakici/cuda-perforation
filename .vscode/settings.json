@@ -1,0 +1,7 @@
+{
+    "files.associations": {
+        "polybench.c": "cpp",
+        "cmath": "cpp",
+        "random": "cpp"
+    }
+}
