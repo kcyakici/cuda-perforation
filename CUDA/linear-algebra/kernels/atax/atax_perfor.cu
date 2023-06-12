@@ -27,8 +27,8 @@
 #define PERCENT_DIFF_ERROR_THRESHOLD 0.5
 
 // define perforation rates
-#define LOOP_PERFORATION_RATE 1
-#define BLOCK_PERFORATION_RATE 1
+#define LOOP_PERFORATION_RATE 1.0
+#define BLOCK_PERFORATION_RATE 0.85
 
 #define GPU_DEVICE 0
 
@@ -56,17 +56,26 @@ void compareResults(int ny, DATA_TYPE POLYBENCH_1D(z, NY, ny), DATA_TYPE POLYBEN
 {
     int i, fail;
     fail = 0;
-
+    int total = 0;
     for (i = 0; i < ny; i++)
     {
+        total++;
         if (percentDiff(z[i], z_outputFromGpu[i]) > PERCENT_DIFF_ERROR_THRESHOLD)
         {
             fail++;
+        }
+        else
+        {
+            printf("Z: %f , Z gpu: %f\n", z[i], z_outputFromGpu[i]);
         }
     }
 
     // print results
     printf("Non-Matching CPU-GPU Outputs Beyond Error Threshold of %4.2f Percent: %d\n", PERCENT_DIFF_ERROR_THRESHOLD, fail);
+
+    printf("Total number of comparations: %d\n", total);
+    printf("Loop perforation rate: %f\n", LOOP_PERFORATION_RATE);
+    printf("Block perforation rate: %f\n", BLOCK_PERFORATION_RATE);
 }
 
 void GPU_argv_init()
@@ -77,7 +86,7 @@ void GPU_argv_init()
     cudaSetDevice(GPU_DEVICE);
 }
 
-__global__ void atax_kernel1(int nx, int ny, DATA_TYPE *A, DATA_TYPE *x, DATA_TYPE *tmp, int perforated_ny)
+__global__ void atax_kernel1(int nx, int ny, DATA_TYPE *A, DATA_TYPE *x, DATA_TYPE *tmp)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -85,14 +94,14 @@ __global__ void atax_kernel1(int nx, int ny, DATA_TYPE *A, DATA_TYPE *x, DATA_TY
     {
         tmp[i] = 0;
         int j;
-        for (j = 0; j < perforated_ny; j++)
+        for (j = 0; j < _PB_NY * LOOP_PERFORATION_RATE; j++)
         {
             tmp[i] += A[i * NY + j] * x[j];
         }
     }
 }
 
-__global__ void atax_kernel2(int nx, int ny, DATA_TYPE *A, DATA_TYPE *y, DATA_TYPE *tmp, int perforated_nx)
+__global__ void atax_kernel2(int nx, int ny, DATA_TYPE *A, DATA_TYPE *y, DATA_TYPE *tmp)
 {
     int j = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -100,7 +109,7 @@ __global__ void atax_kernel2(int nx, int ny, DATA_TYPE *A, DATA_TYPE *y, DATA_TY
     {
         y[j] = 0;
         int i;
-        for (i = 0; i < perforated_nx; i++)
+        for (i = 0; i < _PB_NX * LOOP_PERFORATION_RATE; i++)
         {
             y[j] += A[i * NY + j] * tmp[i];
         }
@@ -141,9 +150,6 @@ void ataxGpu(int nx, int ny, DATA_TYPE POLYBENCH_2D(A, NX, NY, nx, ny), DATA_TYP
     DATA_TYPE *y_gpu;
     DATA_TYPE *tmp_gpu;
 
-    int perforated_nx = LOOP_PERFORATION_RATE * _PB_NX;
-    int perforated_ny = LOOP_PERFORATION_RATE * _PB_NY;
-
     cudaMalloc((void **)&A_gpu, sizeof(DATA_TYPE) * NX * NY);
     cudaMalloc((void **)&x_gpu, sizeof(DATA_TYPE) * NY);
     cudaMalloc((void **)&y_gpu, sizeof(DATA_TYPE) * NY);
@@ -154,12 +160,13 @@ void ataxGpu(int nx, int ny, DATA_TYPE POLYBENCH_2D(A, NX, NY, nx, ny), DATA_TYP
     cudaMemcpy(y_gpu, y, sizeof(DATA_TYPE) * NY, cudaMemcpyHostToDevice);
     cudaMemcpy(tmp_gpu, tmp, sizeof(DATA_TYPE) * NX, cudaMemcpyHostToDevice);
 
-    dim3 block(DIM_THREAD_BLOCK_X, DIM_THREAD_BLOCK_Y);
-    dim3 grid1((size_t)(ceil(((float)NX) / ((float)block.x))), 1);
-    dim3 grid2((size_t)(ceil(((float)NY) / ((float)block.x))), 1);
+    dim3 block(ceil(DIM_THREAD_BLOCK_X * BLOCK_PERFORATION_RATE), ceil(DIM_THREAD_BLOCK_Y * BLOCK_PERFORATION_RATE));
+    dim3 grid1((size_t)(ceil(((float)NX) / ((float)block.x) * BLOCK_PERFORATION_RATE)), 1);
+    dim3 grid2((size_t)(ceil(((float)NY) / ((float)block.x) * BLOCK_PERFORATION_RATE)), 1);
 
     /* Start timer. */
-    polybench_start_instruments;
+    GpuTimer gpuTimer;
+    gpuTimer.Start();
 
     atax_kernel1<<<grid1, block>>>(nx, ny, A_gpu, x_gpu, tmp_gpu, perforated_nx);
     cudaDeviceSynchronize();
@@ -167,9 +174,10 @@ void ataxGpu(int nx, int ny, DATA_TYPE POLYBENCH_2D(A, NX, NY, nx, ny), DATA_TYP
     cudaDeviceSynchronize();
 
     /* Stop and print timer. */
+    gpuTimer.Stop();
+    float elapsed_time = gpuTimer.Elapsed() / 1000;
     printf("GPU Time in seconds:\n");
-    polybench_stop_instruments;
-    polybench_print_instruments;
+    printf("%f\n", elapsed_time);
 
     cudaMemcpy(y_outputFromGpu, y_gpu, sizeof(DATA_TYPE) * NX, cudaMemcpyDeviceToHost);
 

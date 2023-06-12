@@ -27,8 +27,8 @@
 #define PERCENT_DIFF_ERROR_THRESHOLD 0.05
 
 // define perforation rates
-#define LOOP_PERFORATION_RATE 1
-#define BLOCK_PERFORATION_RATE 1
+#define LOOP_PERFORATION_RATE 1.0
+#define BLOCK_PERFORATION_RATE 0.90
 
 #define GPU_DEVICE 0
 
@@ -76,22 +76,32 @@ void init_array(int ni, int nj, int nk, int nl, DATA_TYPE *alpha, DATA_TYPE *bet
 
 void compareResults(int ni, int nl, DATA_TYPE POLYBENCH_2D(D, NI, NL, ni, nl), DATA_TYPE POLYBENCH_2D(D_outputFromGpu, NI, NL, ni, nl))
 {
-    int i, j, fail;
+    int i, j, fail, total;
     fail = 0;
+    total = 0;
 
     for (i = 0; i < ni; i++)
     {
         for (j = 0; j < nl; j++)
         {
+            total++;
             if (percentDiff(D[i][j], D_outputFromGpu[i][j]) > PERCENT_DIFF_ERROR_THRESHOLD)
             {
                 fail++;
+            }
+            else
+            {
+                printf("D: %f , D gpu: %f\n", D[i][j], D_outputFromGpu[i][j]);
             }
         }
     }
 
     // print results
     printf("Non-Matching CPU-GPU Outputs Beyond Error Threshold of %4.2f Percent: %d\n", PERCENT_DIFF_ERROR_THRESHOLD, fail);
+
+    printf("Total number of comparations: %d\n", total);
+    printf("Loop perforation rate: %f\n", LOOP_PERFORATION_RATE);
+    printf("Block perforation rate: %f\n", BLOCK_PERFORATION_RATE);
 }
 
 void GPU_argv_init()
@@ -102,7 +112,7 @@ void GPU_argv_init()
     cudaSetDevice(GPU_DEVICE);
 }
 
-__global__ void mm2_kernel1(int ni, int nj, int nk, int nl, DATA_TYPE alpha, DATA_TYPE beta, DATA_TYPE *tmp, DATA_TYPE *A, DATA_TYPE *B, int perforated_pb_nk)
+__global__ void mm2_kernel1(int ni, int nj, int nk, int nl, DATA_TYPE alpha, DATA_TYPE beta, DATA_TYPE *tmp, DATA_TYPE *A, DATA_TYPE *B, float perforated_pb_nk)
 {
     int j = blockIdx.x * blockDim.x + threadIdx.x;
     int i = blockIdx.y * blockDim.y + threadIdx.y;
@@ -118,7 +128,7 @@ __global__ void mm2_kernel1(int ni, int nj, int nk, int nl, DATA_TYPE alpha, DAT
     }
 }
 
-__global__ void mm2_kernel2(int ni, int nj, int nk, int nl, DATA_TYPE alpha, DATA_TYPE beta, DATA_TYPE *tmp, DATA_TYPE *C, DATA_TYPE *D, int perforated_pb_nj)
+__global__ void mm2_kernel2(int ni, int nj, int nk, int nl, DATA_TYPE alpha, DATA_TYPE beta, DATA_TYPE *tmp, DATA_TYPE *C, DATA_TYPE *D, float perforated_pb_nj)
 {
     int j = blockIdx.x * blockDim.x + threadIdx.x;
     int i = blockIdx.y * blockDim.y + threadIdx.y;
@@ -193,8 +203,13 @@ void mm2Cuda(int ni, int nj, int nk, int nl, DATA_TYPE alpha, DATA_TYPE beta, DA
              DATA_TYPE POLYBENCH_2D(D, NI, NL, ni, nl), DATA_TYPE POLYBENCH_2D(D_outputFromGpu, NI, NL, ni, nl))
 {
 
-    int perforated_pb_nj = _PB_NJ * LOOP_PERFORATION_RATE;
-    int perforated_pb_nk = _PB_NK * LOOP_PERFORATION_RATE;
+    float perforated_pb_nj = (float)(_PB_NJ * LOOP_PERFORATION_RATE);
+    float perforated_pb_nk = (float)(_PB_NK * LOOP_PERFORATION_RATE);
+
+    printf("PB NJ: %d\n", _PB_NJ);
+    printf("PB NJ: %f\n", perforated_pb_nj);
+    printf("PB NK: %d\n", _PB_NK);
+    printf("PB NJ: %f\n", perforated_pb_nk);
 
     DATA_TYPE *tmp_gpu;
     DATA_TYPE *A_gpu;
@@ -214,9 +229,9 @@ void mm2Cuda(int ni, int nj, int nk, int nl, DATA_TYPE alpha, DATA_TYPE beta, DA
     cudaMemcpy(C_gpu, C, sizeof(DATA_TYPE) * NL * NJ, cudaMemcpyHostToDevice);
     cudaMemcpy(D_gpu, D, sizeof(DATA_TYPE) * NI * NL, cudaMemcpyHostToDevice);
 
-    dim3 block(DIM_THREAD_BLOCK_X, DIM_THREAD_BLOCK_Y);
-    dim3 grid1((size_t)ceil(((float)NJ) / ((float)block.x)), (size_t)ceil(((float)NI) / ((float)block.y)));
-    dim3 grid2((size_t)ceil(((float)NL) / ((float)block.x) * BLOCK_PERFORATION_RATE), (size_t)ceil(((float)NI) / ((float)block.y) * BLOCK_PERFORATION_RATE));
+    dim3 block(ceil(DIM_THREAD_BLOCK_X * BLOCK_PERFORATION_RATE), ceil(DIM_THREAD_BLOCK_Y * BLOCK_PERFORATION_RATE));
+    dim3 grid1((size_t)ceil(((float)NJ) / (float)block.x * (float)BLOCK_PERFORATION_RATE), (size_t)ceil(((float)NI) / (float)block.y * (float)BLOCK_PERFORATION_RATE));
+    dim3 grid2((size_t)ceil(((float)NL) / (float)block.x * (float)BLOCK_PERFORATION_RATE), (size_t)ceil(((float)NI) / (float)block.y * (float)BLOCK_PERFORATION_RATE));
 
     /* Start timer. */
     // polybench_start_instruments;

@@ -28,8 +28,10 @@
 #define PERCENT_DIFF_ERROR_THRESHOLD 0.05
 
 // define perforation rates
-#define LOOP_PERFORATION_RATE 1
-#define BLOCK_PERFORATION_RATE 1
+#define LOOP_PERFORATION_RATE 1.0
+#define KERNEL_LAUNCH_LOOP_RATE 0.85
+#define GRID_PERFORATION_RATE 1.0
+#define BLOCK_PERFORATION_RATE 1.0
 
 #define GPU_DEVICE 0
 
@@ -81,6 +83,7 @@ void compareResults(int nr, int nq, int np, DATA_TYPE POLYBENCH_3D(sum, NR, NQ, 
                     DATA_TYPE POLYBENCH_3D(sum_outputFromGpu, NR, NQ, NP, nr, nq, np))
 {
     int fail = 0;
+    int total = 0;
 
     for (int r = 0; r < nr; r++)
     {
@@ -88,6 +91,7 @@ void compareResults(int nr, int nq, int np, DATA_TYPE POLYBENCH_3D(sum, NR, NQ, 
         {
             for (int p = 0; p < np; p++)
             {
+                total++;
                 if (percentDiff(sum[r][q][p], sum_outputFromGpu[r][q][p]) > PERCENT_DIFF_ERROR_THRESHOLD)
                 {
                     fail++;
@@ -98,6 +102,10 @@ void compareResults(int nr, int nq, int np, DATA_TYPE POLYBENCH_3D(sum, NR, NQ, 
 
     // Print results
     printf("Number of misses: %d\n", fail);
+
+    printf("Total number of comparations: %d\n", total);
+    printf("Loop perforation rate: %f\n", LOOP_PERFORATION_RATE);
+    printf("Block perforation rate: %f\n", BLOCK_PERFORATION_RATE);
 }
 
 void GPU_argv_init()
@@ -108,7 +116,7 @@ void GPU_argv_init()
     cudaSetDevice(GPU_DEVICE);
 }
 
-__global__ void doitgen_kernel1(int nr, int nq, int np, DATA_TYPE *sum, DATA_TYPE *A, DATA_TYPE *C4, int r, int perforated_np)
+__global__ void doitgen_kernel1(int nr, int nq, int np, DATA_TYPE *sum, DATA_TYPE *A, DATA_TYPE *C4, int r)
 {
     int p = blockIdx.x * blockDim.x + threadIdx.x;
     int q = blockIdx.y * blockDim.y + threadIdx.y;
@@ -117,7 +125,7 @@ __global__ void doitgen_kernel1(int nr, int nq, int np, DATA_TYPE *sum, DATA_TYP
     {
         sum[r * (nq * np) + q * np + p] = (DATA_TYPE)0.0;
 
-        for (int s = 0; s < perforated_np; s++)
+        for (int s = 0; s < np * LOOP_PERFORATION_RATE; s++)
         {
             sum[r * (nq * np) + q * np + p] = sum[r * (nq * np) + q * np + p] + A[r * (nq * np) + q * np + s] * C4[s * np + p];
         }
@@ -144,7 +152,7 @@ void doitgenCuda(int nr, int nq, int np,
     DATA_TYPE *C4Gpu;
     DATA_TYPE *sumGpu;
 
-    int perforated_np = LOOP_PERFORATION_RATE * np;
+    float perforated_np = LOOP_PERFORATION_RATE * np;
 
     cudaMalloc(&AGpu, nr * nq * np * sizeof(DATA_TYPE));
     cudaMalloc(&C4Gpu, np * np * sizeof(DATA_TYPE));
@@ -154,24 +162,26 @@ void doitgenCuda(int nr, int nq, int np,
     cudaMemcpy(C4Gpu, C4, np * np * sizeof(DATA_TYPE), cudaMemcpyHostToDevice);
     cudaMemcpy(sumGpu, sum_outputFromGpu, nr * nq * np * sizeof(DATA_TYPE), cudaMemcpyHostToDevice);
 
-    dim3 block(DIM_THREAD_BLOCK_X, DIM_THREAD_BLOCK_Y);
-    dim3 grid((unsigned int)ceil(((float)np) / ((float)block.x)), (unsigned int)ceil(((float)nr) / ((float)block.y)));
+    dim3 block(ceil(DIM_THREAD_BLOCK_X * BLOCK_PERFORATION_RATE), ceil(DIM_THREAD_BLOCK_Y * BLOCK_PERFORATION_RATE));
+    dim3 grid((unsigned int)ceil(((float)np) / ((float)block.x) * GRID_PERFORATION_RATE), (unsigned int)ceil(((float)nr) / ((float)block.y) * GRID_PERFORATION_RATE));
 
     /* Start timer. */
-    polybench_start_instruments;
+    GpuTimer gpuTimer;
+    gpuTimer.Start();
 
-    for (int r = 0; r < nr; r++)
+    for (int r = 0; r < nr * KERNEL_LAUNCH_LOOP_RATE; r++)
     {
-        doitgen_kernel1<<<grid, block>>>(nr, nq, np, sumGpu, AGpu, C4Gpu, r, perforated_np);
+        doitgen_kernel1<<<grid, block>>>(nr, nq, np, sumGpu, AGpu, C4Gpu, r);
         cudaDeviceSynchronize();
         doitgen_kernel2<<<grid, block>>>(nr, nq, np, sumGpu, AGpu, C4Gpu, r);
         cudaDeviceSynchronize();
     }
 
     /* Stop and print timer. */
+    gpuTimer.Stop();
+    float elapsed_time = gpuTimer.Elapsed() / 1000;
     printf("GPU Time in seconds:\n");
-    polybench_stop_instruments;
-    polybench_print_instruments;
+    printf("%f\n", elapsed_time);
 
     cudaMemcpy(sum_outputFromGpu, sumGpu, NR * NQ * NP * sizeof(DATA_TYPE), cudaMemcpyDeviceToHost);
 

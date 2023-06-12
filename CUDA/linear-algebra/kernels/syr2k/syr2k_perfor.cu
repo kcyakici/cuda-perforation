@@ -27,8 +27,9 @@
 #define PERCENT_DIFF_ERROR_THRESHOLD 0.05
 
 // define perforation rates
-#define LOOP_PERFORATION_RATE 1
-#define BLOCK_PERFORATION_RATE 1
+#define LOOP_PERFORATION_RATE 1.0
+#define GRID_PERFORATION_RATE 0.85
+#define BLOCK_PERFORATION_RATE 0.85
 
 #define GPU_DEVICE 0
 
@@ -97,14 +98,16 @@ void syr2kCpu(int ni, int nj,
 
 void compareResults(int ni, DATA_TYPE POLYBENCH_2D(C, NI, NI, ni, ni), DATA_TYPE POLYBENCH_2D(C_outputFromGpu, NI, NI, ni, ni))
 {
-    int i, j, fail;
+    int i, j, fail, total;
     fail = 0;
+    total = 0;
 
     // Compare C with D
     for (i = 0; i < ni; i++)
     {
         for (j = 0; j < ni; j++)
         {
+            total++;
             if (percentDiff(C[i][j], C_outputFromGpu[i][j]) > PERCENT_DIFF_ERROR_THRESHOLD)
             {
                 fail++;
@@ -114,6 +117,10 @@ void compareResults(int ni, DATA_TYPE POLYBENCH_2D(C, NI, NI, ni, ni), DATA_TYPE
 
     // print results
     printf("Non-Matching CPU-GPU Outputs Beyond Error Threshold of %4.2f Percent: %d\n", PERCENT_DIFF_ERROR_THRESHOLD, fail);
+
+    printf("Total number of comparations: %d\n", total);
+    printf("Loop perforation rate: %f\n", LOOP_PERFORATION_RATE);
+    printf("Block perforation rate: %f\n", BLOCK_PERFORATION_RATE);
 }
 
 void GPU_argv_init()
@@ -124,7 +131,7 @@ void GPU_argv_init()
     cudaSetDevice(GPU_DEVICE);
 }
 
-__global__ void syr2k_kernel(int ni, int nj, DATA_TYPE alpha, DATA_TYPE beta, DATA_TYPE *a, DATA_TYPE *b, DATA_TYPE *c, int perforated_nj)
+__global__ void syr2k_kernel(int ni, int nj, DATA_TYPE alpha, DATA_TYPE beta, DATA_TYPE *a, DATA_TYPE *b, DATA_TYPE *c)
 {
     int j = blockIdx.x * blockDim.x + threadIdx.x;
     int i = blockIdx.y * blockDim.y + threadIdx.y;
@@ -134,7 +141,7 @@ __global__ void syr2k_kernel(int ni, int nj, DATA_TYPE alpha, DATA_TYPE beta, DA
         c[i * NI + j] *= beta;
 
         int k;
-        for (k = 0; k < perforated_nj; k++)
+        for (k = 0; k < NJ * LOOP_PERFORATION_RATE; k++)
         {
             c[i * NI + j] += alpha * a[i * NJ + k] * b[j * NJ + k] + alpha * b[i * NJ + k] * a[j * NJ + k];
         }
@@ -148,8 +155,6 @@ void syr2kCuda(int ni, int nj, DATA_TYPE alpha, DATA_TYPE beta, DATA_TYPE POLYBE
     DATA_TYPE *B_gpu;
     DATA_TYPE *C_gpu;
 
-    int perforated_nj = LOOP_PERFORATION_RATE * NJ;
-
     cudaMalloc((void **)&A_gpu, sizeof(DATA_TYPE) * NI * NJ);
     cudaMalloc((void **)&B_gpu, sizeof(DATA_TYPE) * NI * NJ);
     cudaMalloc((void **)&C_gpu, sizeof(DATA_TYPE) * NI * NI);
@@ -157,19 +162,21 @@ void syr2kCuda(int ni, int nj, DATA_TYPE alpha, DATA_TYPE beta, DATA_TYPE POLYBE
     cudaMemcpy(B_gpu, B, sizeof(DATA_TYPE) * NI * NJ, cudaMemcpyHostToDevice);
     cudaMemcpy(C_gpu, C, sizeof(DATA_TYPE) * NI * NI, cudaMemcpyHostToDevice);
 
-    dim3 block(DIM_THREAD_BLOCK_X, DIM_THREAD_BLOCK_Y);
-    dim3 grid((size_t)ceil(((float)NI) / ((float)DIM_THREAD_BLOCK_X)), (size_t)(ceil(((float)NI) / ((float)DIM_THREAD_BLOCK_Y))));
+    dim3 block(ceil(DIM_THREAD_BLOCK_X * BLOCK_PERFORATION_RATE), ceil(DIM_THREAD_BLOCK_Y * BLOCK_PERFORATION_RATE));
+    dim3 grid((size_t)ceil(((float)NI) / ((float)DIM_THREAD_BLOCK_X) * GRID_PERFORATION_RATE), (size_t)(ceil(((float)NI) / ((float)DIM_THREAD_BLOCK_Y) * GRID_PERFORATION_RATE)));
 
     /* Start timer. */
-    polybench_start_instruments;
+    GpuTimer gpuTimer;
+    gpuTimer.Start();
 
-    syr2k_kernel<<<grid, block>>>(ni, nj, alpha, beta, A_gpu, B_gpu, C_gpu, perforated_nj);
+    syr2k_kernel<<<grid, block>>>(ni, nj, alpha, beta, A_gpu, B_gpu, C_gpu);
     cudaDeviceSynchronize();
 
     /* Stop and print timer. */
+    gpuTimer.Stop();
+    float elapsed_time = gpuTimer.Elapsed() / 1000;
     printf("GPU Time in seconds:\n");
-    polybench_stop_instruments;
-    polybench_print_instruments;
+    printf("%f\n", elapsed_time);
 
     cudaMemcpy(C_outputFromGpu, C_gpu, sizeof(DATA_TYPE) * NI * NI, cudaMemcpyDeviceToHost);
 

@@ -29,8 +29,8 @@
 #define PERCENT_DIFF_ERROR_THRESHOLD 0.05
 
 // define perforation rates
-#define LOOP_PERFORATION_RATE 0
-#define BLOCK_PERFORATION_RATE 1
+#define LOOP_PERFORATION_RATE 1.0
+#define BLOCK_PERFORATION_RATE 0.95
 
 #define RUN_ON_CPU
 
@@ -76,20 +76,30 @@ void compareResults(int ni, int nl, DATA_TYPE POLYBENCH_2D(G, NI, NL, ni, nl), D
 {
     int i, j, fail;
     fail = 0;
+    int total = 0;
 
     for (i = 0; i < ni; i++)
     {
         for (j = 0; j < nl; j++)
         {
+            total++;
             if (percentDiff(G[i][j], G_outputFromGpu[i][j]) > PERCENT_DIFF_ERROR_THRESHOLD)
             {
                 fail++;
+            }
+            else
+            {
+                printf("G: %f , G gpu: %f\n", G[i][j], G_outputFromGpu[i][j]);
             }
         }
     }
 
     // print results
     printf("Non-Matching CPU-GPU Outputs Beyond Error Threshold of %4.2f Percent: %d\n", PERCENT_DIFF_ERROR_THRESHOLD, fail);
+
+    printf("Total number of comparations: %d\n", total);
+    printf("Loop perforation rate: %f\n", LOOP_PERFORATION_RATE);
+    printf("Block perforation rate: %f\n", BLOCK_PERFORATION_RATE);
 }
 
 void GPU_argv_init()
@@ -100,7 +110,7 @@ void GPU_argv_init()
     cudaSetDevice(GPU_DEVICE);
 }
 
-__global__ void mm3_kernel1(int ni, int nj, int nk, int nl, int nm, DATA_TYPE *A, DATA_TYPE *B, DATA_TYPE *E, int perforated_pb_nk)
+__global__ void mm3_kernel1(int ni, int nj, int nk, int nl, int nm, DATA_TYPE *A, DATA_TYPE *B, DATA_TYPE *E)
 {
     int j = blockIdx.x * blockDim.x + threadIdx.x;
     int i = blockIdx.y * blockDim.y + threadIdx.y;
@@ -109,14 +119,14 @@ __global__ void mm3_kernel1(int ni, int nj, int nk, int nl, int nm, DATA_TYPE *A
     {
         E[i * NJ + j] = 0;
         int k;
-        for (k = 0; k < perforated_pb_nk; k++)
+        for (k = 0; k < _PB_NK * LOOP_PERFORATION_RATE; k++)
         {
             E[i * NJ + j] += A[i * NK + k] * B[k * NJ + j];
         }
     }
 }
 
-__global__ void mm3_kernel2(int ni, int nj, int nk, int nl, int nm, DATA_TYPE *C, DATA_TYPE *D, DATA_TYPE *F, int perforated_pb_nm)
+__global__ void mm3_kernel2(int ni, int nj, int nk, int nl, int nm, DATA_TYPE *C, DATA_TYPE *D, DATA_TYPE *F)
 {
     int j = blockIdx.x * blockDim.x + threadIdx.x;
     int i = blockIdx.y * blockDim.y + threadIdx.y;
@@ -125,14 +135,14 @@ __global__ void mm3_kernel2(int ni, int nj, int nk, int nl, int nm, DATA_TYPE *C
     {
         F[i * NL + j] = 0;
         int k;
-        for (k = 0; k < perforated_pb_nm; k++)
+        for (k = 0; k < _PB_NM * LOOP_PERFORATION_RATE; k++)
         {
             F[i * NL + j] += C[i * NM + k] * D[k * NL + j];
         }
     }
 }
 
-__global__ void mm3_kernel3(int ni, int nj, int nk, int nl, int nm, DATA_TYPE *E, DATA_TYPE *F, DATA_TYPE *G, int perforated_pb_nj)
+__global__ void mm3_kernel3(int ni, int nj, int nk, int nl, int nm, DATA_TYPE *E, DATA_TYPE *F, DATA_TYPE *G)
 {
     int j = blockIdx.x * blockDim.x + threadIdx.x;
     int i = blockIdx.y * blockDim.y + threadIdx.y;
@@ -141,7 +151,7 @@ __global__ void mm3_kernel3(int ni, int nj, int nk, int nl, int nm, DATA_TYPE *E
     {
         G[i * NL + j] = 0;
         int k;
-        for (k = 0; k < perforated_pb_nj; k++)
+        for (k = 0; k < _PB_NJ * LOOP_PERFORATION_RATE; k++)
         {
             G[i * NL + j] += E[i * NJ + k] * F[k * NL + j];
         }
@@ -218,10 +228,6 @@ void mm3Cuda(int ni, int nj, int nk, int nl, int nm,
     DATA_TYPE *F_gpu;
     DATA_TYPE *G_gpu;
 
-    int perforated_pb_nk = (int)LOOP_PERFORATION_RATE * _PB_NK;
-    int perforated_pb_nm = (int)LOOP_PERFORATION_RATE * _PB_NM;
-    int perforated_pb_nj = (int)LOOP_PERFORATION_RATE * _PB_NJ;
-
     cudaMalloc((void **)&A_gpu, sizeof(DATA_TYPE) * NI * NK);
     cudaMalloc((void **)&B_gpu, sizeof(DATA_TYPE) * NK * NJ);
     cudaMalloc((void **)&C_gpu, sizeof(DATA_TYPE) * NJ * NM);
@@ -239,24 +245,27 @@ void mm3Cuda(int ni, int nj, int nk, int nl, int nm,
     cudaMemcpy(G_gpu, G, sizeof(DATA_TYPE) * NI * NL, cudaMemcpyHostToDevice);
 
     dim3 block(DIM_THREAD_BLOCK_X, DIM_THREAD_BLOCK_Y);
-    dim3 grid1((size_t)(ceil(((float)NJ) / ((float)DIM_THREAD_BLOCK_X))), (size_t)(ceil((float)NI / ((float)DIM_THREAD_BLOCK_Y))));
+    dim3 grid1((size_t)(ceil(((float)NJ) / ((float)DIM_THREAD_BLOCK_X) * BLOCK_PERFORATION_RATE)), (size_t)(ceil((float)NI / ((float)DIM_THREAD_BLOCK_Y))));
     dim3 grid2((size_t)(ceil(((float)NL) / ((float)DIM_THREAD_BLOCK_X))), (size_t)(ceil((float)NJ / ((float)DIM_THREAD_BLOCK_Y))));
     dim3 grid3((size_t)(ceil(((float)NL) / ((float)DIM_THREAD_BLOCK_X))), (size_t)(ceil((float)NI / ((float)DIM_THREAD_BLOCK_Y))));
 
     /* Start timer. */
-    polybench_start_instruments;
+    GpuTimer gpuTimer;
+    gpuTimer.Start();
 
-    mm3_kernel1<<<grid1, block>>>(ni, nj, nk, nl, nm, A_gpu, B_gpu, E_gpu, perforated_pb_nk);
+    mm3_kernel1<<<grid1, block>>>(ni, nj, nk, nl, nm, A_gpu, B_gpu, E_gpu);
     cudaDeviceSynchronize();
-    mm3_kernel2<<<grid2, block>>>(ni, nj, nk, nl, nm, C_gpu, D_gpu, F_gpu, perforated_pb_nm);
+    mm3_kernel2<<<grid2, block>>>(ni, nj, nk, nl, nm, C_gpu, D_gpu, F_gpu);
     cudaDeviceSynchronize();
-    mm3_kernel3<<<grid3, block>>>(ni, nj, nk, nl, nm, E_gpu, F_gpu, G_gpu, perforated_pb_nj);
+    mm3_kernel3<<<grid3, block>>>(ni, nj, nk, nl, nm, E_gpu, F_gpu, G_gpu);
     cudaDeviceSynchronize();
 
     /* Stop and print timer. */
+    gpuTimer.Stop();
+    float elapsed_time = gpuTimer.Elapsed() / 1000;
     printf("GPU Time in seconds:\n");
-    polybench_stop_instruments;
-    polybench_print_instruments;
+    printf("%f\n", elapsed_time);
+
     cudaMemcpy(G_outputFromGpu, G_gpu, sizeof(DATA_TYPE) * NI * NL, cudaMemcpyDeviceToHost);
 
     cudaFree(A_gpu);

@@ -27,8 +27,9 @@
 #define PERCENT_DIFF_ERROR_THRESHOLD 0.05
 
 // define perforation rates
-#define LOOP_PERFORATION_RATE 1
-#define BLOCK_PERFORATION_RATE 1
+#define LOOP_PERFORATION_RATE 1.0
+#define GRID_PERFORATION_RATE 1.0
+#define BLOCK_PERFORATION_RATE 1.0
 
 #define GPU_DEVICE 0
 
@@ -74,11 +75,14 @@ void runMvt(int n, DATA_TYPE POLYBENCH_2D(a, N, N, n, n), DATA_TYPE POLYBENCH_1D
 
 void compareResults(int n, DATA_TYPE POLYBENCH_1D(x1, N, n), DATA_TYPE POLYBENCH_1D(x1_outputFromGpu, N, n), DATA_TYPE POLYBENCH_1D(x2, N, n), DATA_TYPE POLYBENCH_1D(x2_outputFromGpu, N, n))
 {
-    int i, fail;
+    int i, fail, total;
     fail = 0;
+    total = 0;
 
     for (i = 0; i < n; i++)
     {
+        total += 2;
+
         if (percentDiff(x1[i], x1_outputFromGpu[i]) > PERCENT_DIFF_ERROR_THRESHOLD)
         {
             fail++;
@@ -92,6 +96,10 @@ void compareResults(int n, DATA_TYPE POLYBENCH_1D(x1, N, n), DATA_TYPE POLYBENCH
 
     // Print results
     printf("Non-Matching CPU-GPU Outputs Beyond Error Threshold of %4.2f Percent: %d\n", PERCENT_DIFF_ERROR_THRESHOLD, fail);
+
+    printf("Total number of comparations: %d\n", total);
+    printf("Loop perforation rate: %f\n", LOOP_PERFORATION_RATE);
+    printf("Block perforation rate: %f\n", BLOCK_PERFORATION_RATE);
 }
 
 void GPU_argv_init()
@@ -139,7 +147,7 @@ void mvtCuda(int n, DATA_TYPE POLYBENCH_2D(a, N, N, n, n), DATA_TYPE POLYBENCH_1
     DATA_TYPE *y_1_gpu;
     DATA_TYPE *y_2_gpu;
 
-    int perforated_pb_n = _PB_N * LOOP_PERFORATION_RATE;
+    float perforated_pb_n = _PB_N * LOOP_PERFORATION_RATE;
 
     cudaMalloc((void **)&a_gpu, sizeof(DATA_TYPE) * N * N);
     cudaMalloc((void **)&x1_gpu, sizeof(DATA_TYPE) * N);
@@ -152,20 +160,22 @@ void mvtCuda(int n, DATA_TYPE POLYBENCH_2D(a, N, N, n, n), DATA_TYPE POLYBENCH_1
     cudaMemcpy(y_1_gpu, y_1, sizeof(DATA_TYPE) * N, cudaMemcpyHostToDevice);
     cudaMemcpy(y_2_gpu, y_2, sizeof(DATA_TYPE) * N, cudaMemcpyHostToDevice);
 
-    dim3 block(DIM_THREAD_BLOCK_X, DIM_THREAD_BLOCK_Y);
-    dim3 grid((size_t)ceil((float)N / ((float)DIM_THREAD_BLOCK_X)), 1);
+    dim3 block(ceil(DIM_THREAD_BLOCK_X * BLOCK_PERFORATION_RATE), ceil(DIM_THREAD_BLOCK_Y * BLOCK_PERFORATION_RATE));
+    dim3 grid((size_t)ceil((float)N / ((float)DIM_THREAD_BLOCK_X) * GRID_PERFORATION_RATE), 1);
 
     /* Start timer. */
-    polybench_start_instruments;
+    GpuTimer gpuTimer;
+    gpuTimer.Start();
 
     mvt_kernel1<<<grid, block>>>(n, a_gpu, x1_gpu, y_1_gpu, perforated_pb_n);
     mvt_kernel2<<<grid, block>>>(n, a_gpu, x2_gpu, y_2_gpu, perforated_pb_n);
     cudaDeviceSynchronize();
 
     /* Stop and print timer. */
+    gpuTimer.Stop();
+    float elapsed_time = gpuTimer.Elapsed() / 1000;
     printf("GPU Time in seconds:\n");
-    polybench_stop_instruments;
-    polybench_print_instruments;
+    printf("%f\n", elapsed_time);
 
     cudaMemcpy(x1_outputFromGpu, x1_gpu, sizeof(DATA_TYPE) * N, cudaMemcpyDeviceToHost);
     cudaMemcpy(x2_outputFromGpu, x2_gpu, sizeof(DATA_TYPE) * N, cudaMemcpyDeviceToHost);
